@@ -24,3 +24,144 @@ This repo brings the **Dynamic Nelson–Siegel** yield-curve model to life in Py
 * **Plot Routines**: Simple scripts that recreate classic yield-curve snapshots and show how your Level, Slope, and Curvature factors drift over time.
 
 Each module is designed to be as self-contained as possible—so whether you’re teaching term-structure econ or building a production risk dashboard, you can pick and choose what you need.
+
+
+* ** Python Code**
+import numpy as np
+import matplotlib.pyplot as plt
+from data_loader import LoadLiu_and_Wu_Data, Preprocess
+from estimation import (
+    GridSearchBestLambda,
+    FitNelsonSiegelOLS,
+    EstimateKalmanSystemMatrix,
+    DLM_Multivariate,
+)
+
+class DynamicNelsonSiegel:
+    def __init__(
+        self,
+        frequency: str = "Monthly",
+        low_lambda: float = 0.40,
+        high_lambda: float = 0.71,
+        grid_steps: int = 100,
+        silent: bool = True,
+    ):
+        """
+        frequency: data frequency label passed into loader/preprocessor
+        low_lambda, high_lambda: search bounds for the spline decay parameter
+        grid_steps: how many points between low_lambda and high_lambda
+        silent: if True, suppress intermediate printouts
+        """
+        self.params = {
+            "Frequency": frequency,
+            "LowLambda": low_lambda,
+            "HighLambda": high_lambda,
+            "NumGrid": grid_steps,
+            "Silent": silent,
+        }
+
+    def two_step(self):
+        """Diebold–Li two-step OLS → Kalman initialization → filter run."""
+        R = {"Frequency": self.params["Frequency"]}
+        R = LoadLiu_and_Wu_Data(R)
+        R = Preprocess(R)
+        R.update(
+            {
+                "LambdaHistory": [],
+                "DNSLLHistory": [],
+                "RecordLLHistory": 0,
+            }
+        )
+
+        # 1) Grid search for best λ
+        R = GridSearchBestLambda(
+            R,
+            self.params["LowLambda"],
+            self.params["HighLambda"],
+            self.params["NumGrid"],
+            self.params["Silent"],
+        )
+        R["Lambda"] = R["MaxLikelihoodLambda"]
+
+        # 2) Cross-sectional OLS to back out Level/Slope/Curvature
+        R = FitNelsonSiegelOLS(R, self.params["Silent"])
+
+        # 3) Estimate AR(1) state matrix from those factors
+        R = EstimateKalmanSystemMatrix(R, self.params["Silent"])
+
+        # 4) Run the multivariate Kalman filter & smoother
+        R["RecordLLHistory"] = 1
+        R = DLM_Multivariate(R, self.params["Silent"])
+
+        # 5) Diagnostics
+        self._print_fit_stats(R)
+        return R
+
+    def em_fit(self, num_em_iters: int = 6, grid_steps: int = None):
+        """
+        Expectation-Maximization loop:
+        Alternately search λ + OLS + system-matrix → Kalman fit → update covariances.
+        """
+        R = {"Frequency": self.params["Frequency"]}
+        R = LoadLiu_and_Wu_Data(R)
+        R = Preprocess(R)
+        R.update(
+            {
+                "LambdaHistory": [],
+                "DNSLLHistory": [],
+                "RecordLLHistory": 0,
+            }
+        )
+
+        steps = grid_steps or self.params["NumGrid"]
+        for i in range(1, num_em_iters + 1):
+            if not self.params["Silent"]:
+                print(f"EM iteration {i}/{num_em_iters}")
+
+            # same four-step core as two_step()
+            R = GridSearchBestLambda(
+                R,
+                self.params["LowLambda"],
+                self.params["HighLambda"],
+                steps,
+                self.params["Silent"],
+            )
+            R["Lambda"] = R["MaxLikelihoodLambda"]
+            R = FitNelsonSiegelOLS(R, self.params["Silent"])
+            R = EstimateKalmanSystemMatrix(R, self.params["Silent"])
+            R["RecordLLHistory"] = 1
+            R = DLM_Multivariate(R, self.params["Silent"])
+
+            if not self.params["Silent"]:
+                ll = np.round(R["DLMoutput"]["LL"], 2)
+                print(f" → log-likelihood: {ll}")
+
+        # Plot EM convergence
+        history = R["DNSLLHistory"][:num_em_iters]
+        plt.plot(range(1, len(history) + 1), history, marker="o")
+        plt.title("DNS Log-Likelihood vs EM Iteration")
+        plt.xlabel("EM Iteration")
+        plt.ylabel("Log-Likelihood")
+        plt.show()
+
+        # Final diagnostics
+        self._print_fit_stats(R)
+        return R
+
+    def _print_fit_stats(self, R):
+        """Shared printout of overall & per-maturity correlations."""
+        f = R["DLMoutput"]["f"]
+        Y = R["DLMoutput"]["Y"]
+
+        # overall Spearman
+        sc = np.corrcoef(np.ravel(Y), np.ravel(f), method="spearman")[0, 1]
+        print(f"Overall Spearman corr.: {sc:.4f}")
+
+        # per-maturity Spearman / Pearson
+        for idx, mat in enumerate(R["Maturity"]):
+            y_row = Y[idx, :]
+            f_row = f[idx, :]
+            sp = np.corrcoef(y_row, f_row, method="spearman")[0, 1]
+            pe = np.corrcoef(y_row, f_row, method="pearson")[0, 1]
+            print(f" Maturity {mat}: Spearman={sp:.4f}, Pearson={pe:.4f}")
+
