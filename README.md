@@ -15,7 +15,7 @@ This repo brings the **Dynamic Nelson–Siegel** yield-curve model to life in Py
 
 ---
 
-### Tools & Technology (the nuts & bolts)
+### Tools & Technology
 
 * **Core Stack**: `numpy`, `pandas` for data; `matplotlib` for plots.
 * **Econometrics**: `statsmodels` (for OLS and VAR diagnostics) and a custom AR(1) setup.
